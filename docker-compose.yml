@@ -1,0 +1,96 @@
+version: '3.8'
+
+services:
+
+  # ===== DATABASES =====
+
+  hr-postgres:
+    image: postgres:15
+    container_name: hr-postgres
+    environment:
+      POSTGRES_DB: employeedb
+      POSTGRES_USER: hruser
+      POSTGRES_PASSWORD: hrpassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - hr-postgres-data:/var/lib/postgresql/data
+    networks:
+      - hr-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hruser -d employeedb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  leave-postgres:
+    image: postgres:15
+    container_name: leave-postgres
+    environment:
+      POSTGRES_DB: leavedb
+      POSTGRES_USER: leaveuser
+      POSTGRES_PASSWORD: leavepassword
+    ports:
+      - "5433:5432"
+    volumes:
+      - leave-postgres-data:/var/lib/postgresql/data
+    networks:
+      - hr-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U leaveuser -d leavedb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===== MICROSERVICES =====
+
+  employee-service:
+    build:
+      context: ./employee-service
+      dockerfile: Dockerfile
+    container_name: employee-service
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://hr-postgres:5432/employeedb
+      SPRING_DATASOURCE_USERNAME: hruser
+      SPRING_DATASOURCE_PASSWORD: hrpassword
+      SPRING_JPA_HIBERNATE_DDL_AUTO: update
+    ports:
+      - "8080:8080"
+    depends_on:
+      hr-postgres:
+        condition: service_healthy
+    networks:
+      - hr-network
+    restart: on-failure
+
+  leave-service:
+    build:
+      context: ./leave-service
+      dockerfile: Dockerfile
+    container_name: leave-service
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://leave-postgres:5432/leavedb
+      SPRING_DATASOURCE_USERNAME: leaveuser
+      SPRING_DATASOURCE_PASSWORD: leavepassword
+      SPRING_JPA_HIBERNATE_DDL_AUTO: update
+      EMPLOYEE_SERVICE_URL: http://employee-service:8080
+    ports:
+      - "8081:8081"
+    depends_on:
+      leave-postgres:
+        condition: service_healthy
+      employee-service:
+        condition: service_started
+    networks:
+      - hr-network
+    restart: on-failure
+
+# ===== VOLUMES =====
+volumes:
+  hr-postgres-data:
+  leave-postgres-data:
+
+# ===== NETWORKS =====
+networks:
+  hr-network:
+    driver: bridge

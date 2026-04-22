@@ -1,0 +1,23 @@
+# Maven build output
+target/
+*.jar
+*.war
+*.class
+
+# IntelliJ files
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Spring Boot secrets
+application-prod.yml
+application-secrets.yml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/

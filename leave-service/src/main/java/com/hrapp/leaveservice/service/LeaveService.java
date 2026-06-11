@@ -25,10 +25,15 @@ public class LeaveService {
         log.info("Processing leave request for employee: {}",
                 request.getEmployeeId());
 
-        // Validate employee exists
-        employeeClient.getEmployeeById(request.getEmployeeId())
+        // Validate employee exists and is active
+        var employee = employeeClient.getEmployeeById(request.getEmployeeId())
                 .orElseThrow(() -> new ResourceNotFoundException(
                         "Employee", "id", request.getEmployeeId()));
+
+        if (!"ACTIVE".equalsIgnoreCase(employee.getStatus())) {
+            throw new IllegalStateException(
+                    "Leave can only be applied for ACTIVE employees");
+        }
 
         // Validate dates
         if (request.getEndDate().isBefore(request.getStartDate())) {

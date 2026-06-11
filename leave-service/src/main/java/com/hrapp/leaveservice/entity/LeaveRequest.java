@@ -47,6 +47,7 @@ public class LeaveRequest {
     @Column(nullable = false)
     private LeaveStatus status = LeaveStatus.PENDING;
 
+    @Builder.Default
     @Column(updatable = false)
     private LocalDateTime appliedAt = LocalDateTime.now();
 

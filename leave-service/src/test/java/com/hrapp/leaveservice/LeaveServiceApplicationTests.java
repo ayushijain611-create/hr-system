@@ -9,6 +9,9 @@ import com.hrapp.leaveservice.service.LeaveService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -20,6 +23,8 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.BiConsumer;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -56,18 +61,56 @@ class LeaveServiceApplicationTests {
                 .build();
     }
 
-    // ── applyForLeave ─────────────────────────────────────────────────────────
+    // ── applyForLeave — happy path ────────────────────────────────────────────
 
     @Test
-    void applyForLeave_validRequest_returnsSavedLeave() {
+    void applyForLeave_validActiveEmployee_returnsPendingLeave() {
         when(employeeClient.getEmployeeById(1L)).thenReturn(Optional.of(activeEmployee));
-        when(leaveRepository.save(any(LeaveRequest.class))).thenReturn(pendingLeave);
+        when(leaveRepository.save(any())).thenReturn(pendingLeave);
 
         LeaveRequest result = leaveService.applyForLeave(pendingLeave);
 
         assertThat(result.getStatus()).isEqualTo(LeaveRequest.LeaveStatus.PENDING);
         verify(leaveRepository).save(pendingLeave);
     }
+
+    @Test
+    void applyForLeave_sameDayLeave_isAccepted() {
+        when(employeeClient.getEmployeeById(1L)).thenReturn(Optional.of(activeEmployee));
+        pendingLeave.setStartDate(LocalDate.of(2026, 7, 1));
+        pendingLeave.setEndDate(LocalDate.of(2026, 7, 1));
+        when(leaveRepository.save(any())).thenReturn(pendingLeave);
+
+        assertThatCode(() -> leaveService.applyForLeave(pendingLeave))
+                .doesNotThrowAnyException();
+    }
+
+    // ── applyForLeave — non-ACTIVE employee statuses (parameterized) ───────────
+    // Streams every non-active status to assert all are rejected with the
+    // same IllegalStateException mentioning "ACTIVE".
+
+    static Stream<Arguments> nonActiveEmployeeStatuses() {
+        return Stream.of(
+                Arguments.of("INACTIVE"),
+                Arguments.of("ON_LEAVE")
+        );
+    }
+
+    @ParameterizedTest(name = "employee status={0} → IllegalStateException")
+    @MethodSource("nonActiveEmployeeStatuses")
+    void applyForLeave_nonActiveEmployee_throwsIllegalStateException(String status) {
+        EmployeeDTO nonActiveEmployee = new EmployeeDTO(1L, "Jane", "Doe",
+                "jane@example.com", "Engineering", "Engineer", status);
+        when(employeeClient.getEmployeeById(1L)).thenReturn(Optional.of(nonActiveEmployee));
+
+        assertThatThrownBy(() -> leaveService.applyForLeave(pendingLeave))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("ACTIVE");
+
+        verify(leaveRepository, never()).save(any());
+    }
+
+    // ── applyForLeave — employee not found ────────────────────────────────────
 
     @Test
     void applyForLeave_employeeNotFound_throwsResourceNotFoundException() {
@@ -81,31 +124,7 @@ class LeaveServiceApplicationTests {
         verify(leaveRepository, never()).save(any());
     }
 
-    @Test
-    void applyForLeave_inactiveEmployee_throwsIllegalStateException() {
-        EmployeeDTO inactiveEmployee = new EmployeeDTO(1L, "Jane", "Doe",
-                "jane@example.com", "Engineering", "Engineer", "INACTIVE");
-        when(employeeClient.getEmployeeById(1L)).thenReturn(Optional.of(inactiveEmployee));
-
-        assertThatThrownBy(() -> leaveService.applyForLeave(pendingLeave))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("ACTIVE");
-
-        verify(leaveRepository, never()).save(any());
-    }
-
-    @Test
-    void applyForLeave_onLeaveEmployee_throwsIllegalStateException() {
-        EmployeeDTO onLeaveEmployee = new EmployeeDTO(1L, "Jane", "Doe",
-                "jane@example.com", "Engineering", "Engineer", "ON_LEAVE");
-        when(employeeClient.getEmployeeById(1L)).thenReturn(Optional.of(onLeaveEmployee));
-
-        assertThatThrownBy(() -> leaveService.applyForLeave(pendingLeave))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("ACTIVE");
-
-        verify(leaveRepository, never()).save(any());
-    }
+    // ── applyForLeave — invalid date range ────────────────────────────────────
 
     @Test
     void applyForLeave_endDateBeforeStartDate_throwsIllegalArgumentException() {
@@ -120,21 +139,79 @@ class LeaveServiceApplicationTests {
         verify(leaveRepository, never()).save(any());
     }
 
-    @Test
-    void applyForLeave_sameDayLeave_isAccepted() {
-        when(employeeClient.getEmployeeById(1L)).thenReturn(Optional.of(activeEmployee));
-        pendingLeave.setStartDate(LocalDate.of(2026, 7, 1));
-        pendingLeave.setEndDate(LocalDate.of(2026, 7, 1));
-        when(leaveRepository.save(any())).thenReturn(pendingLeave);
+    // ── approve/reject/cancel — forbidden starting statuses (parameterized) ────
+    // Each operation may only act on PENDING leaves. Streams APPROVED, REJECTED,
+    // and CANCELLED as forbidden starting statuses for each operation.
 
-        assertThatCode(() -> leaveService.applyForLeave(pendingLeave))
-                .doesNotThrowAnyException();
+    static Stream<Arguments> nonPendingStatuses() {
+        return Stream.of(
+                Arguments.of(LeaveRequest.LeaveStatus.APPROVED),
+                Arguments.of(LeaveRequest.LeaveStatus.REJECTED),
+                Arguments.of(LeaveRequest.LeaveStatus.CANCELLED)
+        );
     }
 
-    // ── approveLeave ──────────────────────────────────────────────────────────
+    @ParameterizedTest(name = "approveLeave when status={0} → IllegalStateException")
+    @MethodSource("nonPendingStatuses")
+    void approveLeave_nonPendingLeave_throwsIllegalStateException(LeaveRequest.LeaveStatus status) {
+        pendingLeave.setStatus(status);
+        when(leaveRepository.findById(1L)).thenReturn(Optional.of(pendingLeave));
+
+        assertThatThrownBy(() -> leaveService.approveLeave(1L, "comments"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("PENDING");
+    }
+
+    @ParameterizedTest(name = "rejectLeave when status={0} → IllegalStateException")
+    @MethodSource("nonPendingStatuses")
+    void rejectLeave_nonPendingLeave_throwsIllegalStateException(LeaveRequest.LeaveStatus status) {
+        pendingLeave.setStatus(status);
+        when(leaveRepository.findById(1L)).thenReturn(Optional.of(pendingLeave));
+
+        assertThatThrownBy(() -> leaveService.rejectLeave(1L, "comments"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("PENDING");
+    }
+
+    @ParameterizedTest(name = "cancelLeave when status={0} → IllegalStateException")
+    @MethodSource("nonPendingStatuses")
+    void cancelLeave_nonPendingLeave_throwsIllegalStateException(LeaveRequest.LeaveStatus status) {
+        pendingLeave.setStatus(status);
+        when(leaveRepository.findById(1L)).thenReturn(Optional.of(pendingLeave));
+
+        assertThatThrownBy(() -> leaveService.cancelLeave(1L))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("PENDING");
+    }
+
+    // ── not-found cases across all operations (parameterized) ─────────────────
+    // Streams a lambda per service operation so all "unknown ID →
+    // ResourceNotFoundException" paths are covered from a single test method.
+
+    static Stream<Arguments> notFoundOperations() {
+        return Stream.of(
+                Arguments.of("getLeaveById",  (BiConsumer<LeaveService, Long>) (svc, id) -> svc.getLeaveById(id)),
+                Arguments.of("approveLeave",  (BiConsumer<LeaveService, Long>) (svc, id) -> svc.approveLeave(id, "c")),
+                Arguments.of("rejectLeave",   (BiConsumer<LeaveService, Long>) (svc, id) -> svc.rejectLeave(id, "c")),
+                Arguments.of("cancelLeave",   (BiConsumer<LeaveService, Long>) (svc, id) -> svc.cancelLeave(id))
+        );
+    }
+
+    @ParameterizedTest(name = "{0} with unknown id → ResourceNotFoundException")
+    @MethodSource("notFoundOperations")
+    void leaveOperations_unknownId_throwsResourceNotFoundException(
+            String name, BiConsumer<LeaveService, Long> operation) {
+        when(leaveRepository.findById(99L)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> operation.accept(leaveService, 99L))
+                .isInstanceOf(ResourceNotFoundException.class)
+                .hasMessageContaining("99");
+    }
+
+    // ── approveLeave — happy path ─────────────────────────────────────────────
 
     @Test
-    void approveLeave_pendingLeave_setsApprovedStatus() {
+    void approveLeave_pendingLeave_setsApprovedStatusAndReviewFields() {
         when(leaveRepository.findById(1L)).thenReturn(Optional.of(pendingLeave));
         when(leaveRepository.save(any())).thenAnswer(i -> i.getArgument(0));
 
@@ -145,28 +222,10 @@ class LeaveServiceApplicationTests {
         assertThat(result.getReviewedAt()).isNotNull();
     }
 
-    @Test
-    void approveLeave_alreadyApproved_throwsIllegalStateException() {
-        pendingLeave.setStatus(LeaveRequest.LeaveStatus.APPROVED);
-        when(leaveRepository.findById(1L)).thenReturn(Optional.of(pendingLeave));
-
-        assertThatThrownBy(() -> leaveService.approveLeave(1L, "Again?"))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("PENDING");
-    }
+    // ── rejectLeave — happy path ──────────────────────────────────────────────
 
     @Test
-    void approveLeave_notFound_throwsResourceNotFoundException() {
-        when(leaveRepository.findById(99L)).thenReturn(Optional.empty());
-
-        assertThatThrownBy(() -> leaveService.approveLeave(99L, "comments"))
-                .isInstanceOf(ResourceNotFoundException.class);
-    }
-
-    // ── rejectLeave ───────────────────────────────────────────────────────────
-
-    @Test
-    void rejectLeave_pendingLeave_setsRejectedStatus() {
+    void rejectLeave_pendingLeave_setsRejectedStatusAndReviewFields() {
         when(leaveRepository.findById(1L)).thenReturn(Optional.of(pendingLeave));
         when(leaveRepository.save(any())).thenAnswer(i -> i.getArgument(0));
 
@@ -177,25 +236,7 @@ class LeaveServiceApplicationTests {
         assertThat(result.getReviewedAt()).isNotNull();
     }
 
-    @Test
-    void rejectLeave_alreadyRejected_throwsIllegalStateException() {
-        pendingLeave.setStatus(LeaveRequest.LeaveStatus.REJECTED);
-        when(leaveRepository.findById(1L)).thenReturn(Optional.of(pendingLeave));
-
-        assertThatThrownBy(() -> leaveService.rejectLeave(1L, "comments"))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("PENDING");
-    }
-
-    @Test
-    void rejectLeave_notFound_throwsResourceNotFoundException() {
-        when(leaveRepository.findById(99L)).thenReturn(Optional.empty());
-
-        assertThatThrownBy(() -> leaveService.rejectLeave(99L, "comments"))
-                .isInstanceOf(ResourceNotFoundException.class);
-    }
-
-    // ── cancelLeave ───────────────────────────────────────────────────────────
+    // ── cancelLeave — happy path ──────────────────────────────────────────────
 
     @Test
     void cancelLeave_pendingLeave_setsCancelledStatus() {
@@ -207,62 +248,25 @@ class LeaveServiceApplicationTests {
         assertThat(result.getStatus()).isEqualTo(LeaveRequest.LeaveStatus.CANCELLED);
     }
 
-    @Test
-    void cancelLeave_approvedLeave_throwsIllegalStateException() {
-        pendingLeave.setStatus(LeaveRequest.LeaveStatus.APPROVED);
-        when(leaveRepository.findById(1L)).thenReturn(Optional.of(pendingLeave));
+    // ── getLeavesByEmployee — parameterized ────────────────────────────────────
+    // Streams (employeeId, expectedSize) pairs to cover both found and empty cases.
 
-        assertThatThrownBy(() -> leaveService.cancelLeave(1L))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("PENDING");
+    static Stream<Arguments> leavesByEmployeeScenarios() {
+        return Stream.of(
+                Arguments.of(1L, 1),
+                Arguments.of(2L, 0)
+        );
     }
 
-    @Test
-    void cancelLeave_notFound_throwsResourceNotFoundException() {
-        when(leaveRepository.findById(99L)).thenReturn(Optional.empty());
+    @ParameterizedTest(name = "employeeId={0} → {1} result(s)")
+    @MethodSource("leavesByEmployeeScenarios")
+    void getLeavesByEmployee_returnsExpectedCount(Long employeeId, int expectedSize) {
+        List<LeaveRequest> mockResult = expectedSize > 0 ? List.of(pendingLeave) : List.of();
+        when(leaveRepository.findByEmployeeId(employeeId)).thenReturn(mockResult);
 
-        assertThatThrownBy(() -> leaveService.cancelLeave(99L))
-                .isInstanceOf(ResourceNotFoundException.class);
-    }
+        List<LeaveRequest> result = leaveService.getLeavesByEmployee(employeeId);
 
-    // ── getLeaveById ──────────────────────────────────────────────────────────
-
-    @Test
-    void getLeaveById_existingId_returnsLeave() {
-        when(leaveRepository.findById(1L)).thenReturn(Optional.of(pendingLeave));
-
-        LeaveRequest result = leaveService.getLeaveById(1L);
-
-        assertThat(result).isEqualTo(pendingLeave);
-    }
-
-    @Test
-    void getLeaveById_unknownId_throwsResourceNotFoundException() {
-        when(leaveRepository.findById(99L)).thenReturn(Optional.empty());
-
-        assertThatThrownBy(() -> leaveService.getLeaveById(99L))
-                .isInstanceOf(ResourceNotFoundException.class)
-                .hasMessageContaining("99");
-    }
-
-    // ── getLeavesByEmployee ───────────────────────────────────────────────────
-
-    @Test
-    void getLeavesByEmployee_returnsAllLeavesForEmployee() {
-        when(leaveRepository.findByEmployeeId(1L)).thenReturn(List.of(pendingLeave));
-
-        List<LeaveRequest> result = leaveService.getLeavesByEmployee(1L);
-
-        assertThat(result).hasSize(1).containsExactly(pendingLeave);
-    }
-
-    @Test
-    void getLeavesByEmployee_noLeaves_returnsEmptyList() {
-        when(leaveRepository.findByEmployeeId(2L)).thenReturn(List.of());
-
-        List<LeaveRequest> result = leaveService.getLeavesByEmployee(2L);
-
-        assertThat(result).isEmpty();
+        assertThat(result).hasSize(expectedSize);
     }
 
     // ── getAllLeaves ──────────────────────────────────────────────────────────

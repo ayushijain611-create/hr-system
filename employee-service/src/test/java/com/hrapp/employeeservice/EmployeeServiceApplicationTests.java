@@ -7,6 +7,9 @@ import com.hrapp.employeeservice.service.EmployeeService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -16,6 +19,7 @@ import org.springframework.data.domain.Pageable;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -82,17 +86,14 @@ class EmployeeServiceApplicationTests {
     @Test
     void updateEmployee_existingId_updatesAllFields() {
         Employee updated = Employee.builder()
-                .firstName("John")
-                .lastName("Smith")
-                .email("john@example.com")
-                .department("HR")
-                .jobTitle("Manager")
-                .salary(95000.0)
+                .firstName("John").lastName("Smith")
+                .email("john@example.com").department("HR")
+                .jobTitle("Manager").salary(95000.0)
                 .status(Employee.EmployeeStatus.INACTIVE)
                 .build();
 
         when(employeeRepository.findById(1L)).thenReturn(Optional.of(employee));
-        when(employeeRepository.save(any(Employee.class))).thenAnswer(i -> i.getArgument(0));
+        when(employeeRepository.save(any())).thenAnswer(i -> i.getArgument(0));
 
         Employee result = employeeService.updateEmployee(1L, updated);
 
@@ -137,70 +138,87 @@ class EmployeeServiceApplicationTests {
         verify(employeeRepository, never()).delete(any());
     }
 
-    // ── getEmployeesByDepartment ──────────────────────────────────────────────
+    // ── getEmployeesByDepartment — parameterized ───────────────────────────────
+    // Streams (department, expectedResultCount) pairs to verify both the
+    // "found" and "not found" paths from a single test method.
 
-    @Test
-    void getEmployeesByDepartment_returnsMatchingEmployees() {
-        when(employeeRepository.findByDepartment("Engineering"))
-                .thenReturn(List.of(employee));
-
-        List<Employee> result = employeeService.getEmployeesByDepartment("Engineering");
-
-        assertThat(result).hasSize(1).containsExactly(employee);
+    static Stream<Arguments> departmentScenarios() {
+        return Stream.of(
+                Arguments.of("Engineering", 1),
+                Arguments.of("Finance",     0)
+        );
     }
 
-    @Test
-    void getEmployeesByDepartment_noneFound_returnsEmptyList() {
-        when(employeeRepository.findByDepartment("Finance")).thenReturn(List.of());
+    @ParameterizedTest(name = "department={0} → {1} result(s)")
+    @MethodSource("departmentScenarios")
+    void getEmployeesByDepartment_returnsExpectedCount(String department, int expectedCount) {
+        List<Employee> mockResult = expectedCount > 0 ? List.of(employee) : List.of();
+        when(employeeRepository.findByDepartment(department)).thenReturn(mockResult);
 
-        List<Employee> result = employeeService.getEmployeesByDepartment("Finance");
+        List<Employee> result = employeeService.getEmployeesByDepartment(department);
 
-        assertThat(result).isEmpty();
+        assertThat(result).hasSize(expectedCount);
     }
 
-    // ── getAllEmployeesPaginated ───────────────────────────────────────────────
+    // ── getAllEmployeesPaginated — valid sort fields (parameterized) ────────────
+    // Streams every allowed field × both sort directions to assert none throws.
+
+    static Stream<Arguments> validSortFieldScenarios() {
+        List<String> fields = List.of(
+                "id", "firstName", "lastName", "email",
+                "department", "jobTitle", "salary", "status"
+        );
+        List<String> directions = List.of("asc", "desc");
+        return fields.stream()
+                .flatMap(field -> directions.stream()
+                        .map(dir -> Arguments.of(field, dir)));
+    }
+
+    @ParameterizedTest(name = "sortBy={0}, dir={1} → no exception")
+    @MethodSource("validSortFieldScenarios")
+    void getAllEmployeesPaginated_validSortField_doesNotThrow(String sortBy, String sortDir) {
+        when(employeeRepository.findAll(any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of()));
+
+        assertThatCode(() ->
+                employeeService.getAllEmployeesPaginated(0, 10, sortBy, sortDir))
+                .doesNotThrowAnyException();
+    }
+
+    // ── getAllEmployeesPaginated — invalid sort fields (parameterized) ──────────
+    // Streams bad inputs to assert each one throws IllegalArgumentException
+    // containing the offending field name in the message.
+
+    static Stream<Arguments> invalidSortFieldScenarios() {
+        return Stream.of(
+                Arguments.of("nonExistentField"),
+                Arguments.of("NAME"),           // wrong case — "firstName" is correct
+                Arguments.of("Id"),             // old wrong-cased field name from before the fix
+                Arguments.of("salary;drop"),    // injection attempt
+                Arguments.of("")               // blank
+        );
+    }
+
+    @ParameterizedTest(name = "sortBy=\"{0}\" → IllegalArgumentException")
+    @MethodSource("invalidSortFieldScenarios")
+    void getAllEmployeesPaginated_invalidSortField_throwsIllegalArgumentException(String sortBy) {
+        assertThatThrownBy(() ->
+                employeeService.getAllEmployeesPaginated(0, 10, sortBy, "asc"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(sortBy);
+
+        verify(employeeRepository, never()).findAll(any(Pageable.class));
+    }
+
+    // ── getAllEmployeesPaginated — happy path ─────────────────────────────────
 
     @Test
-    void getAllEmployeesPaginated_validSortField_returnsPage() {
+    void getAllEmployeesPaginated_validRequest_returnsPage() {
         Page<Employee> page = new PageImpl<>(List.of(employee));
         when(employeeRepository.findAll(any(Pageable.class))).thenReturn(page);
 
         Page<Employee> result = employeeService.getAllEmployeesPaginated(0, 10, "firstName", "asc");
 
         assertThat(result.getContent()).containsExactly(employee);
-        verify(employeeRepository).findAll(any(Pageable.class));
-    }
-
-    @Test
-    void getAllEmployeesPaginated_descSort_returnsPage() {
-        Page<Employee> page = new PageImpl<>(List.of(employee));
-        when(employeeRepository.findAll(any(Pageable.class))).thenReturn(page);
-
-        Page<Employee> result = employeeService.getAllEmployeesPaginated(0, 10, "salary", "desc");
-
-        assertThat(result.getContent()).containsExactly(employee);
-    }
-
-    @Test
-    void getAllEmployeesPaginated_invalidSortField_throwsIllegalArgumentException() {
-        assertThatThrownBy(() ->
-                employeeService.getAllEmployeesPaginated(0, 10, "nonExistentField", "asc"))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("nonExistentField");
-
-        verify(employeeRepository, never()).findAll(any(Pageable.class));
-    }
-
-    @Test
-    void getAllEmployeesPaginated_allAllowedSortFields_doNotThrow() {
-        Page<Employee> page = new PageImpl<>(List.of());
-        when(employeeRepository.findAll(any(Pageable.class))).thenReturn(page);
-
-        for (String field : List.of("id", "firstName", "lastName", "email",
-                "department", "jobTitle", "salary", "status")) {
-            assertThatCode(() ->
-                    employeeService.getAllEmployeesPaginated(0, 10, field, "asc"))
-                    .doesNotThrowAnyException();
-        }
     }
 }

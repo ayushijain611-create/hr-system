@@ -14,7 +14,7 @@ public class Employee {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long Id;
+    private Long id;
 
     @NotBlank(message = "First name is required")
     @Column(nullable = false)

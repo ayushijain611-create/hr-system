@@ -7,12 +7,12 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
-import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 @Service
 @RequiredArgsConstructor
@@ -48,28 +48,28 @@ public class EmployeeService {
         return employeeRepository.save(emp);
     }
 
-    public boolean deleteEmployee(Long id) {
+    public void deleteEmployee(Long id) {
         log.info("Deleting employee with id: {}", id);
-        Employee employee = employeeRepository.findById(id).orElseThrow(() -> new ResourceNotFoundException("Employee","id",id));
-            employeeRepository.delete(employee);
-        return true;
+        Employee employee = employeeRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Employee", "id", id));
+        employeeRepository.delete(employee);
     }
 
     public List<Employee> getEmployeesByDepartment(String department) {
         return employeeRepository.findByDepartment(department);
     }
 
-    public Page<Employee> getAllEmployeesPaginated(int page, int size, String sortBy, String sortDir) {
+    private static final Set<String> ALLOWED_SORT_FIELDS =
+            Set.of("id", "firstName", "lastName", "email", "department", "jobTitle", "salary", "status");
 
-        // Build sort direction
+    public Page<Employee> getAllEmployeesPaginated(int page, int size, String sortBy, String sortDir) {
+        if (!ALLOWED_SORT_FIELDS.contains(sortBy)) {
+            throw new IllegalArgumentException(
+                    "Invalid sort field '" + sortBy + "'. Allowed: " + ALLOWED_SORT_FIELDS);
+        }
         Sort sort = sortDir.equalsIgnoreCase("desc")
                 ? Sort.by(sortBy).descending()
                 : Sort.by(sortBy).ascending();
-
-        // Build pageable object — this is the magic
-        Pageable pageable = PageRequest.of(page, size, sort);
-
-        // Spring handles the SQL automatically
-        return employeeRepository.findAll(pageable);
+        return employeeRepository.findAll(PageRequest.of(page, size, sort));
     }
 }

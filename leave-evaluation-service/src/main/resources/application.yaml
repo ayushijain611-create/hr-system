@@ -1,0 +1,60 @@
+spring:
+  application:
+    name: leave-evaluation-service
+  datasource:
+    url: jdbc:postgresql://localhost:5434/leaveevaldb
+    username: evaluser
+    password: evalpassword
+    driver-class-name: org.postgresql.Driver
+  servlet:
+    multipart:
+      max-file-size: 25MB
+      max-request-size: 25MB
+  ai:
+    ollama:
+      base-url: http://localhost:11434
+      chat:
+        options:
+          model: llama3.1:8b
+          temperature: 0.2
+          format: json
+          # Cap generated tokens. Our JSON response is small (~150-250 tokens)
+          # but reasons can stretch when the prompt has rich context, so we
+          # leave headroom to avoid truncating the closing brace - an
+          # unterminated response would fail JSON parsing.
+          num-predict: 700
+          # Tighter context window than llama3.1's 128k default. Our prompt is
+          # well under 4k tokens and a smaller context dramatically reduces
+          # CPU memory pressure / per-token decode time.
+          num-ctx: 4096
+          # Keep the model resident in Ollama for 30 minutes between calls so
+          # we don't pay a 10-30s model-load penalty on every request.
+          keep-alive: 30m
+      embedding:
+        options:
+          model: nomic-embed-text
+      init:
+        pull-model-strategy: when_missing
+        timeout: 30m
+        max-retries: 1
+    vectorstore:
+      pgvector:
+        initialize-schema: true
+        dimensions: 768
+        index-type: HNSW
+        distance-type: COSINE_DISTANCE
+        table-name: vector_store
+
+server:
+  port: 8082
+
+employee-service:
+  url: http://localhost:8080
+
+leave-service:
+  url: http://localhost:8081
+
+logging:
+  level:
+    com.hrapp: DEBUG
+    org.springframework.ai: INFO

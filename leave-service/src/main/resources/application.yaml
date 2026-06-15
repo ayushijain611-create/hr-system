@@ -20,6 +20,11 @@ server:
 employee-service:
   url: http://localhost:8080
 
+evaluation-service:
+  url: http://localhost:8082
+  connect-timeout-ms: 5000
+  read-timeout-ms: 300000
+
 logging:
   level:
     com.hrapp: DEBUG

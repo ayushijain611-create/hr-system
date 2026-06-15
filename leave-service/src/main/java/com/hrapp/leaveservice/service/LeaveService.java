@@ -1,6 +1,9 @@
 package com.hrapp.leaveservice.service;
 
 import com.hrapp.leaveservice.client.EmployeeClient;
+import com.hrapp.leaveservice.client.EvaluationClient;
+import com.hrapp.leaveservice.dto.EvaluationRequestDTO;
+import com.hrapp.leaveservice.dto.EvaluationResponseDTO;
 import com.hrapp.leaveservice.entity.LeaveRequest;
 import com.hrapp.leaveservice.exception.ResourceNotFoundException;
 import com.hrapp.leaveservice.repository.LeaveRepository;
@@ -11,6 +14,7 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 
@@ -20,6 +24,7 @@ import java.util.List;
 public class LeaveService {
     private final LeaveRepository leaveRepository;
     private final EmployeeClient employeeClient;
+    private final EvaluationClient evaluationClient;
 
     public LeaveRequest applyForLeave(LeaveRequest request) {
         log.info("Processing leave request for employee: {}",
@@ -42,7 +47,52 @@ public class LeaveService {
         }
 
         request.setStatus(LeaveRequest.LeaveStatus.PENDING);
-        return leaveRepository.save(request);
+        LeaveRequest saved = leaveRepository.save(request);
+
+        // Attach AI recommendation (advisory only; status stays PENDING regardless).
+        return attachAiRecommendation(saved);
+    }
+
+    // Calls leave-evaluation-service synchronously; on success persists the AI fields, on failure logs and returns the leave unchanged.
+    private LeaveRequest attachAiRecommendation(LeaveRequest leave) {
+        EvaluationRequestDTO req = EvaluationRequestDTO.builder()
+                .leaveId(leave.getId())
+                .employeeId(leave.getEmployeeId())
+                .leaveType(leave.getLeaveType().name())
+                .startDate(leave.getStartDate())
+                .endDate(leave.getEndDate())
+                .reason(leave.getReason())
+                .build();
+
+        return evaluationClient.evaluate(req)
+                .map(eval -> persistEvaluation(leave, eval))
+                .orElse(leave);
+    }
+
+    private LeaveRequest persistEvaluation(LeaveRequest leave, EvaluationResponseDTO eval) {
+        try {
+            if (eval.getOutcome() != null) {
+                leave.setAiOutcome(LeaveRequest.AiOutcome.valueOf(eval.getOutcome().toUpperCase()));
+            }
+            leave.setAiConfidenceScore(eval.getConfidenceScore());
+            leave.setAiReasons(eval.getReasons());
+            LeaveRequest persisted = leaveRepository.save(leave);
+            log.info("AI recommendation persisted for leave id={}: outcome={}, confidence={}",
+                    persisted.getId(), persisted.getAiOutcome(), persisted.getAiConfidenceScore());
+            return persisted;
+        } catch (IllegalArgumentException e) {
+            log.warn("Unrecognised AI outcome '{}' for leave id={}; skipping AI fields",
+                    eval.getOutcome(), leave.getId());
+            return leave;
+        }
+    }
+
+    public List<LeaveRequest> searchLeaves(
+            LocalDate startDate,
+            LocalDate endDate,
+            LeaveRequest.LeaveStatus status,
+            Long excludeEmployeeId) {
+        return leaveRepository.searchOverlapping(startDate, endDate, status, excludeEmployeeId);
     }
 
     public LeaveRequest approveLeave(Long leaveId, String comments) {

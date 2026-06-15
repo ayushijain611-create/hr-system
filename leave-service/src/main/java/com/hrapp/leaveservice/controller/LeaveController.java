@@ -5,10 +5,12 @@ import com.hrapp.leaveservice.service.LeaveService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
 
@@ -44,6 +46,16 @@ public class LeaveController {
             @PathVariable Long employeeId) {
         return ResponseEntity.ok(
                 leaveService.getLeavesByEmployee(employeeId));
+    }
+
+    @GetMapping("/search")
+    public ResponseEntity<List<LeaveRequest>> searchLeaves(
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate startDate,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate endDate,
+            @RequestParam(required = false) LeaveRequest.LeaveStatus status,
+            @RequestParam(required = false) Long excludeEmployeeId) {
+        return ResponseEntity.ok(
+                leaveService.searchLeaves(startDate, endDate, status, excludeEmployeeId));
     }
 
     @PutMapping("/{id}/approve")

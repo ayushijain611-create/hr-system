@@ -42,6 +42,65 @@ services:
       timeout: 5s
       retries: 5
 
+  leave-eval-postgres:
+    image: pgvector/pgvector:pg16
+    container_name: leave-eval-postgres
+    environment:
+      POSTGRES_DB: leaveevaldb
+      POSTGRES_USER: evaluser
+      POSTGRES_PASSWORD: evalpassword
+    ports:
+      - "5434:5432"
+    volumes:
+      - leave-eval-postgres-data:/var/lib/postgresql/data
+    networks:
+      - hr-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U evaluser -d leaveevaldb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===== LLM RUNTIME =====
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - hr-network
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: on-failure
+
+  # One-shot init container: pulls the chat and embedding models, then exits.
+  # leave-evaluation-service depends on this completing successfully.
+  ollama-model-init:
+    image: ollama/ollama:latest
+    container_name: ollama-model-init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Pulling required models (first run downloads ~5GB)..."
+        ollama pull nomic-embed-text
+        ollama pull llama3.1:8b
+        echo "Models ready."
+    networks:
+      - hr-network
+    restart: "no"
+
   # ===== MICROSERVICES =====
 
   employee-service:
@@ -63,6 +122,31 @@ services:
       - hr-network
     restart: on-failure
 
+  leave-evaluation-service:
+    build:
+      context: ./leave-evaluation-service
+      dockerfile: Dockerfile
+    container_name: leave-evaluation-service
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://leave-eval-postgres:5432/leaveevaldb
+      SPRING_DATASOURCE_USERNAME: evaluser
+      SPRING_DATASOURCE_PASSWORD: evalpassword
+      SPRING_AI_OLLAMA_BASE_URL: http://ollama:11434
+      EMPLOYEE_SERVICE_URL: http://employee-service:8080
+      LEAVE_SERVICE_URL: http://leave-service:8081
+    ports:
+      - "8082:8082"
+    depends_on:
+      leave-eval-postgres:
+        condition: service_healthy
+      ollama-model-init:
+        condition: service_completed_successfully
+      employee-service:
+        condition: service_started
+    networks:
+      - hr-network
+    restart: on-failure
+
   leave-service:
     build:
       context: ./leave-service
@@ -74,12 +158,15 @@ services:
       SPRING_DATASOURCE_PASSWORD: leavepassword
       SPRING_JPA_HIBERNATE_DDL_AUTO: update
       EMPLOYEE_SERVICE_URL: http://employee-service:8080
+      EVALUATION_SERVICE_URL: http://leave-evaluation-service:8082
     ports:
       - "8081:8081"
     depends_on:
       leave-postgres:
         condition: service_healthy
       employee-service:
+        condition: service_started
+      leave-evaluation-service:
         condition: service_started
     networks:
       - hr-network
@@ -89,6 +176,8 @@ services:
 volumes:
   hr-postgres-data:
   leave-postgres-data:
+  leave-eval-postgres-data:
+  ollama-data:
 
 # ===== NETWORKS =====
 networks:

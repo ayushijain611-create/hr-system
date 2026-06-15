@@ -1,5 +1,6 @@
 package com.hrapp.leaveservice.entity;
 
+import com.hrapp.leaveservice.util.StringListJsonConverter;
 import jakarta.persistence.*;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -10,6 +11,7 @@ import lombok.NoArgsConstructor;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Entity
 @Table(name = "leave_requests")
@@ -55,6 +57,17 @@ public class LeaveRequest {
 
     private String reviewerComments;
 
+    @Enumerated(EnumType.STRING)
+    @Column(name = "ai_outcome")
+    private AiOutcome aiOutcome;
+
+    @Column(name = "ai_confidence_score")
+    private Double aiConfidenceScore;
+
+    @Convert(converter = StringListJsonConverter.class)
+    @Column(name = "ai_reasons", columnDefinition = "TEXT")
+    private List<String> aiReasons;
+
     @Transient
     private long totalDays;
 
@@ -72,5 +85,9 @@ public class LeaveRequest {
 
     public enum LeaveStatus {
         PENDING, APPROVED, REJECTED, CANCELLED
+    }
+
+    public enum AiOutcome {
+        APPROVE, REJECT
     }
 }

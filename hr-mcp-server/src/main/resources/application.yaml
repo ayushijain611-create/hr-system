@@ -1,0 +1,40 @@
+spring:
+  application:
+    name: hr-mcp-server
+  # STDIO transport: the MCP client owns stdout for JSON-RPC framing.
+  # The server must be headless (no embedded web container) and must
+  # not print anything to stdout besides the JSON-RPC stream.
+  main:
+    web-application-type: none
+    banner-mode: "off"
+  ai:
+    mcp:
+      server:
+        name: hr-mcp-server
+        version: 0.0.1
+        # stdio is the default transport for spring-ai-starter-mcp-server;
+        # set explicitly for clarity.
+        stdio: true
+
+# Silence console logging and route everything to a rolling file so the
+# MCP client's stdin parser never sees a stray log line.
+logging:
+  pattern:
+    console: ""
+  file:
+    name: ${user.home}/.hr-mcp-server/hr-mcp-server.log
+  level:
+    root: INFO
+    com.hrapp: INFO
+    org.springframework.ai: INFO
+
+# Upstream HR microservices. Defaults assume the docker-compose stack is
+# running on the host with the standard port mappings.
+employee-service:
+  url: ${EMPLOYEE_SERVICE_URL:http://localhost:8080}
+
+leave-service:
+  url: ${LEAVE_SERVICE_URL:http://localhost:8081}
+
+evaluation-service:
+  url: ${EVALUATION_SERVICE_URL:http://localhost:8082}

@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    STDIO MCP server: stdout is owned by the JSON-RPC framing layer and
+    MUST never receive log lines. We therefore declare NO console appender
+    at all (not even a silenced one), and route every log event to a single
+    rolling file under the user's home directory.
+
+    Logback picks this up automatically as the Spring-aware config and
+    overrides any `logging.pattern.console` properties from application.yaml.
+-->
+<configuration>
+
+    <property name="LOG_FILE"
+              value="${user.home}/.hr-mcp-server/hr-mcp-server.log"/>
+
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_FILE}</file>
+        <encoder>
+            <pattern>%d{yyyy-MM-dd'T'HH:mm:ss.SSSXXX} %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+        <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+            <fileNamePattern>${user.home}/.hr-mcp-server/hr-mcp-server-%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
+            <maxFileSize>10MB</maxFileSize>
+            <maxHistory>14</maxHistory>
+            <totalSizeCap>200MB</totalSizeCap>
+        </rollingPolicy>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="FILE"/>
+    </root>
+
+    <!--
+        Keep com.hrapp at DEBUG so the per-tool invocation logs ("Tool ping
+        invoked", "Tool list_employees invoked page=0 size=3" etc.) land in
+        the log file. Useful when an LLM produces a wrong argument shape or
+        an upstream call fails -- the tail of the file is enough to triage.
+
+        Everything else stays at INFO. We previously had org.springframework.ai
+        / org.springaicommunity at DEBUG and io.modelcontextprotocol at TRACE
+        while diagnosing a tools/call no-response issue; those have been
+        rolled back since the root cause turned out to be a client-side
+        stdin-close race, not a server-side dispatch bug.
+    -->
+    <logger name="com.hrapp" level="DEBUG"/>
+
+    <!--
+        Spring AI MCP autoconfig emits a few benign bean-post-processor
+        and annotation-scanner warnings on every boot; quiet them.
+    -->
+    <logger name="org.springframework.context.support.PostProcessorRegistrationDelegate$BeanPostProcessorChecker" level="ERROR"/>
+    <logger name="org.springframework.modulith.provider.tool" level="ERROR"/>
+
+</configuration>

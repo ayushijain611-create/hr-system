@@ -15,14 +15,35 @@ spring:
         # stdio is the default transport for spring-ai-starter-mcp-server;
         # set explicitly for clarity.
         stdio: true
+        # MUST be ASYNC for a STDIO (non-servlet) deployment.
+        #
+        # Spring AI's `McpServerAutoConfiguration#mcpSyncServer` bean is
+        # `@ConditionalOnWebApplication(type=SERVLET)`, so the sync
+        # server is never created when we run with
+        # `spring.main.web-application-type=none`. Only the async server
+        # bean is active.
+        #
+        # `ToolCallbackConverterAutoConfiguration` then has TWO mutually
+        # exclusive beans:
+        #   - `syncTools` (List<SyncToolSpecification>)  -> active when type=SYNC (default)
+        #   - `asyncTools` (List<AsyncToolSpecification>) -> active when type=ASYNC
+        # The async server only consumes `List<AsyncToolSpecification>`.
+        #
+        # If we leave type=SYNC (the default), our 11 ToolCallbacks are
+        # converted to *sync* specs but the active *async* server gets
+        # an empty `AsyncToolSpecification` list. Result: tools/list
+        # still works (the schemas are reachable through another path),
+        # but tools/call dispatches to nothing and silently produces no
+        # response. Setting type=ASYNC wraps each blocking @Tool method
+        # in `Mono.fromCallable(...)` on the elastic scheduler.
+        type: ASYNC
 
-# Silence console logging and route everything to a rolling file so the
-# MCP client's stdin parser never sees a stray log line.
+# Logback configuration lives in src/main/resources/logback-spring.xml.
+# The XML config has NO console appender at all (defense in depth for
+# STDIO), so we deliberately do NOT set `logging.file.name` or
+# `logging.pattern.console` here -- both would re-enable Spring Boot's
+# default appenders and risk leaking log lines to stdout.
 logging:
-  pattern:
-    console: ""
-  file:
-    name: ${user.home}/.hr-mcp-server/hr-mcp-server.log
   level:
     root: INFO
     com.hrapp: INFO

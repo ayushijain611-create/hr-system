@@ -30,14 +30,35 @@ stays `PENDING` — a human manager still makes the final call. If the
 evaluation service is unavailable the leave is still created; the AI
 fields are simply left `null`.
 
+A fourth optional component, `hr-mcp-server`, wraps the three services
+and exposes a curated subset of their operations to AI agents
+(Claude Desktop, Cursor, ChatGPT desktop, etc.) over the Model Context
+Protocol:
+
+```
+   ┌──────────────────────────────┐
+   │  AI agent                    │
+   │  Claude Desktop / Cursor /   │
+   │  ChatGPT desktop             │
+   └──────────────┬───────────────┘
+                  │ MCP over STDIO (JSON-RPC)
+                  ▼
+   ┌──────────────────────────────┐
+   │  hr-mcp-server (JVM)         │ ──► employee-service       :8080
+   │  spring-ai-starter-mcp-      │ ──► leave-service          :8081
+   │    server                    │ ──► leave-evaluation-svc   :8082
+   └──────────────────────────────┘
+```
+
 ## Tech Stack
 
 - **Java 17** + **Spring Boot 3.5.13**
 - **Spring Data JPA + Hibernate** — relational ORM
-- **Spring AI 1.1.7** — LLM client + RAG primitives
+- **Spring AI 1.1.7 / 1.1.8** — LLM client + RAG primitives + MCP server
   - `spring-ai-starter-model-ollama`
   - `spring-ai-starter-vector-store-pgvector`
   - `spring-ai-pdf-document-reader` (Apache PDFBox)
+  - `spring-ai-starter-mcp-server` (STDIO transport, hr-mcp-server only)
 - **Ollama** — local LLM runtime
   - `llama3.1:8b` for chat
   - `nomic-embed-text` (768-dim) for embeddings
@@ -90,6 +111,155 @@ request, and asks a local Ollama LLM for a structured recommendation.
 | GET | `/api/policies` | List ingested policies (source filename + chunk count) |
 | DELETE | `/api/policies/{source}` | Remove all chunks for a policy by filename |
 | POST | `/api/evaluations` | Evaluate a leave request; returns `{outcome, confidenceScore, reasons, policySourcesUsed}` |
+
+## MCP Server (`hr-mcp-server`) — HR tools for AI agents
+
+An optional Spring Boot module that re-exposes the three HR services as
+[Model Context Protocol](https://modelcontextprotocol.io) tools over
+**STDIO**. Drop the jar into any MCP-aware client and your AI agent can
+look up employees, manage leave requests, and run policy-aware leave
+evaluations as first-class tool calls.
+
+### Tools exposed (12)
+
+| Upstream service | Tool | Effect |
+|---|---|---|
+| employee | `get_employee_by_id` | read |
+| employee | `list_employees` | read, paginated |
+| employee | `get_employees_by_department` | read |
+| leave | `get_leave_by_id` | read |
+| leave | `list_leaves` | read, paginated |
+| leave | `get_leaves_by_employee` | read |
+| leave | `search_leaves` | read, by date-window + optional status |
+| leave | `approve_leave` | state change `PENDING → APPROVED` |
+| leave | `reject_leave` | state change `PENDING → REJECTED` |
+| leave | `cancel_leave` | state change `PENDING → CANCELLED` |
+| leave-evaluation | `evaluate_leave_request` | advisory only; no state change |
+| internal | `ping` | diagnostic, no upstream call |
+
+**Intentional omissions:** leave application (`POST /api/leaves`),
+employee CRUD writes, and policy ingestion are not exposed. Filing
+leaves and rewriting policies are admin operations that should not flow
+through an LLM.
+
+### Build
+
+```bash
+cd hr-mcp-server
+mvn -DskipTests package
+```
+
+Produces `target/hr-mcp-server-0.0.1-SNAPSHOT.jar` (~28 MB, fat jar).
+The server is **headless** — no embedded Tomcat, no HTTP port, stdout is
+reserved for the MCP JSON-RPC stream.
+
+### Smoke test
+
+Requires `employee-service`, `leave-service`, and
+`leave-evaluation-service` to be reachable on `localhost:8080/8081/8082`
+(via Docker Compose or running them locally), and at least one ingested
+policy in the evaluation service.
+
+```powershell
+powershell -ExecutionPolicy Bypass `
+  -File hr-mcp-server\scripts\mcp-smoke.ps1
+```
+
+The script seeds a fresh `PENDING` leave on `leave-service`, spawns the
+MCP server as a child process, and walks it through `initialize` →
+`tools/list` → five `tools/call` invocations covering one tool from each
+category. A green run:
+
+```
+[1] initialize         OK    protocolVersion=2024-11-05 server=hr-mcp-server/0.0.1
+[2] tools/list         OK    advertised=12 expected=12
+[3] ping               OK    result='"pong"'
+[4] list_employees     OK    returned=3 total=4
+[5] evaluate_leave     OK    outcome=APPROVE confidence=0.85 sources=[Employee Leave Policy.pdf; ...]
+[6] get_leave_by_id    OK    id=23 status=PENDING totalDays=2
+[7] cancel_leave       OK    id=23 status=CANCELLED
+Smoke PASSED
+```
+
+### Wiring into an MCP client
+
+The same JSON snippet works for every MCP client — only the
+configuration file location changes. Adjust the absolute path to the
+jar for your machine.
+
+#### Claude Desktop
+
+Edit `claude_desktop_config.json`:
+
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "hr": {
+      "command": "java",
+      "args": [
+        "-jar",
+        "C:\\Projects\\spring-boot\\Claude\\hr-systems\\hr-mcp-server\\target\\hr-mcp-server-0.0.1-SNAPSHOT.jar"
+      ],
+      "env": {
+        "EMPLOYEE_SERVICE_URL":   "http://localhost:8080",
+        "LEAVE_SERVICE_URL":      "http://localhost:8081",
+        "EVALUATION_SERVICE_URL": "http://localhost:8082"
+      }
+    }
+  }
+}
+```
+
+Restart Claude Desktop; the 11 user-facing tools (everything except
+`ping`) appear in the tools menu.
+
+#### Cursor
+
+Project-scoped (`.cursor/mcp.json` in the repo root) or user-scoped
+(`~/.cursor/mcp.json`) — same JSON shape as above.
+
+#### ChatGPT desktop & other clients
+
+Any MCP client that supports STDIO servers can use the same
+`command` / `args` / `env` triple. Consult the client's documentation
+for the exact config path.
+
+### Logs
+
+The MCP server cannot write to stdout (the MCP client owns that pipe
+for JSON-RPC framing) so Logback is configured to skip the console
+appender entirely and route everything to a rolling file:
+
+```
+%USERPROFILE%\.hr-mcp-server\hr-mcp-server.log    (Windows)
+$HOME/.hr-mcp-server/hr-mcp-server.log            (macOS/Linux)
+```
+
+Each tool invocation logs at `INFO` level (`Tool list_employees invoked
+page=0 size=3`, etc.); upstream HTTP errors propagate to the LLM as
+tool errors instead of being swallowed.
+
+### Limitations / future work
+
+- **STDIO only.** One client process per JVM. Each connected agent
+  spawns its own server. Switching to Streamable HTTP transport (one
+  shared JVM, many concurrent clients) is the obvious next step and
+  was scoped out of this iteration only to keep the deployment
+  surface minimal.
+- **Sequential tools/call recommended.** The MCP Java SDK uses a
+  non-thread-safe Reactor sink for outbound framing, so issuing
+  parallel `tools/call` requests against a single STDIO session can
+  occasionally drop responses with `Failed to enqueue message`. All
+  major MCP clients (Claude Desktop, Cursor, ChatGPT) already drive
+  servers sequentially, so this is not a practical concern, but
+  custom clients should follow the same pattern.
+- **No authentication.** The server inherits whatever access the
+  spawning OS user already has to the three upstream services. When
+  we move to HTTP transport, OAuth / API-key middleware becomes a
+  hard requirement.
 
 ## Running with Docker Compose (one-command startup)
 
@@ -192,6 +362,8 @@ null/exception paths from the LLM, and edge-case request fields
 - **RAG over company policies** with idempotent PDF ingestion
 - **Synchronous AI evaluation** at leave-application time with graceful
   degradation when the AI service or LLM is unavailable
+- **MCP server (STDIO)** that exposes 11 read/write HR tools to AI
+  agents like Claude Desktop, Cursor, and ChatGPT
 - Structured logging
 
 ## Notes / Limitations

@@ -426,6 +426,52 @@ class LeaveEvaluationServiceTest {
                 .contains("Senior Engineer");
     }
 
+    // The retrieval query MUST lead with type-specific keywords so semantic
+    // search biases toward chunks about the actual leave type. Without
+    // these, a SICK request retrieves the largest section of the corpus
+    // (usually annual-leave / balance text) and the LLM hallucinates
+    // "sufficient annual leave balance" reasons for SICK requests.
+    static Stream<Arguments> typeKeywordExpansionCases() {
+        return Stream.of(
+                Arguments.of("SICK",      List.of("sick", "illness", "medical", "doctor")),
+                Arguments.of("ANNUAL",    List.of("vacation", "entitlement", "balance", "accrual")),
+                Arguments.of("MATERNITY", List.of("maternity", "childbirth", "parental", "statutory")),
+                Arguments.of("PATERNITY", List.of("paternity", "new parent", "statutory")),
+                Arguments.of("UNPAID",    List.of("unpaid", "sabbatical", "without pay")),
+                Arguments.of("EMERGENCY", List.of("emergency", "bereavement", "compassionate", "discretion"))
+        );
+    }
+
+    @ParameterizedTest(name = "[{index}] retrieval query for {0} contains type-specific keywords")
+    @MethodSource("typeKeywordExpansionCases")
+    void retrievalQueryIncludesLeaveTypeKeywords(String leaveType, List<String> expectedKeywords) {
+        EvaluationRequest req = new EvaluationRequest(
+                1L, 7L, leaveType,
+                LocalDate.of(2026, 8, 1), LocalDate.of(2026, 8, 3),
+                "reason");
+        when(employeeClient.getEmployeeById(req.employeeId())).thenReturn(Optional.of(employee()));
+        when(leaveHistoryClient.getLeavesForEmployee(req.employeeId())).thenReturn(List.of());
+        when(leaveHistoryClient.searchOverlappingApproved(any(), any(), any())).thenReturn(List.of());
+        stubChunks(List.of(chunk("policy", "p.pdf")));
+        stubLlm(new LlmEvaluation(Outcome.APPROVE, 0.5, List.of("r")));
+
+        service.evaluate(req);
+
+        ArgumentCaptor<SearchRequest> captor = ArgumentCaptor.forClass(SearchRequest.class);
+        verify(vectorStore).similaritySearch(captor.capture());
+        String query = captor.getValue().getQuery().toLowerCase();
+        for (String kw : expectedKeywords) {
+            assertThat(query)
+                    .as("expected keyword %s in query for %s leave: <%s>", kw, leaveType, query)
+                    .contains(kw.toLowerCase());
+        }
+        // Type-specific keywords should appear BEFORE the generic
+        // "Request: type=..." clause so they dominate the embedding.
+        assertThat(query.indexOf(expectedKeywords.get(0).toLowerCase()))
+                .as("type keywords must lead the query, not trail it")
+                .isLessThan(query.indexOf("request: type="));
+    }
+
     // ================================================================
     //  INVALID INPUTS / ERROR PATHS
     // ================================================================
@@ -583,6 +629,134 @@ class LeaveEvaluationServiceTest {
 
         assertThat(result).isNotNull();
         assertThat(result.outcome()).isEqualTo(Outcome.APPROVE);
+    }
+
+    // ================================================================
+    //  DERIVED FLAGS (BACKDATED / LONG_DURATION / HEAVY_OVERLAP)
+    // ================================================================
+
+    // computeFlags is the single source of truth that prevents the LLM
+    // from having to do error-prone date arithmetic. Each row covers a
+    // distinct branch.
+    static Stream<Arguments> computeFlagsCases() {
+        LocalDate today = LocalDate.now();
+        return Stream.of(
+                Arguments.of(
+                        "future-dated 3-day ANNUAL with no overlap -> no flags",
+                        new EvaluationRequest(1L, 7L, "ANNUAL",
+                                today.plusDays(20), today.plusDays(22), "r"),
+                        3L, 20L,
+                        List.<LeaveSummaryDTO>of(),
+                        List.<String>of()
+                ),
+                Arguments.of(
+                        "backdated short ANNUAL -> BACKDATED only (no LONG_DURATION)",
+                        new EvaluationRequest(1L, 7L, "ANNUAL",
+                                today.minusDays(2), today.plusDays(2), "r"),
+                        5L, -2L,
+                        List.<LeaveSummaryDTO>of(),
+                        List.of("BACKDATED")
+                ),
+                Arguments.of(
+                        "17-day ANNUAL future -> LONG_DURATION only",
+                        new EvaluationRequest(1L, 7L, "ANNUAL",
+                                today.plusDays(30), today.plusDays(46), "r"),
+                        17L, 30L,
+                        List.<LeaveSummaryDTO>of(),
+                        List.of("LONG_DURATION")
+                ),
+                Arguments.of(
+                        "60-day MATERNITY future -> NO LONG_DURATION (carve-out)",
+                        new EvaluationRequest(1L, 7L, "MATERNITY",
+                                today.plusDays(30), today.plusDays(89), "r"),
+                        60L, 30L,
+                        List.<LeaveSummaryDTO>of(),
+                        List.<String>of()
+                ),
+                Arguments.of(
+                        "future-dated short with 2 overlapping team leaves -> HEAVY_OVERLAP(2)",
+                        new EvaluationRequest(1L, 7L, "ANNUAL",
+                                today.plusDays(5), today.plusDays(7), "r"),
+                        3L, 5L,
+                        List.of(
+                                leave(101L, today.plusDays(5), today.plusDays(7), "APPROVED"),
+                                leave(102L, today.plusDays(5), today.plusDays(7), "APPROVED")
+                        ),
+                        List.of("HEAVY_OVERLAP(2)")
+                ),
+                Arguments.of(
+                        "backdated 17d ANNUAL with 3 overlaps -> all three flags",
+                        new EvaluationRequest(1L, 7L, "ANNUAL",
+                                today.minusDays(4), today.plusDays(12), "r"),
+                        17L, -4L,
+                        List.of(
+                                leave(201L, today.minusDays(4), today.plusDays(12), "APPROVED"),
+                                leave(202L, today.minusDays(4), today.plusDays(12), "APPROVED"),
+                                leave(203L, today.minusDays(4), today.plusDays(12), "APPROVED")
+                        ),
+                        List.of("BACKDATED", "LONG_DURATION", "HEAVY_OVERLAP(3)")
+                )
+        );
+    }
+
+    @ParameterizedTest(name = "[{index}] {0}")
+    @MethodSource("computeFlagsCases")
+    void computesDerivedFlags(
+            String scenario,
+            EvaluationRequest req,
+            long durationDays,
+            long noticeDays,
+            List<LeaveSummaryDTO> overlapping,
+            List<String> expectedFlags) {
+
+        List<String> actual = LeaveEvaluationService.computeFlags(
+                req, durationDays, noticeDays, overlapping);
+
+        assertThat(actual).isEqualTo(expectedFlags);
+    }
+
+    // End-to-end check that the FLAGS line lands in the user prompt with
+    // the BACKDATED token, so the LLM sees it instead of having to infer
+    // it from the raw "notice=-4d" string.
+    @Test
+    void userPromptIncludesBackdatedFlagForPastStartDate() {
+        LocalDate today = LocalDate.now();
+        EvaluationRequest req = new EvaluationRequest(
+                8L, 1L, "ANNUAL",
+                today.minusDays(4), today.plusDays(12), "Family vacation");
+        when(employeeClient.getEmployeeById(req.employeeId())).thenReturn(Optional.of(employee()));
+        when(leaveHistoryClient.getLeavesForEmployee(req.employeeId())).thenReturn(List.of());
+        when(leaveHistoryClient.searchOverlappingApproved(any(), any(), any())).thenReturn(List.of());
+        stubChunks(List.of(chunk("policy", "p.pdf")));
+        stubLlm(new LlmEvaluation(Outcome.REJECT, 0.8, List.of("r")));
+
+        service.evaluate(req);
+
+        ArgumentCaptor<String> capture = ArgumentCaptor.forClass(String.class);
+        verify(requestSpec).user(capture.capture());
+        String prompt = capture.getValue();
+        assertThat(prompt).contains("FLAGS: ").contains("BACKDATED");
+    }
+
+    // When no derived flags apply, FLAGS line still appears but says
+    // "(none)" so the prompt shape stays consistent across all requests.
+    @Test
+    void userPromptIncludesEmptyFlagsLineWhenNothingToFlag() {
+        LocalDate today = LocalDate.now();
+        EvaluationRequest req = new EvaluationRequest(
+                1L, 7L, "ANNUAL",
+                today.plusDays(20), today.plusDays(22), "Wedding");
+        when(employeeClient.getEmployeeById(req.employeeId())).thenReturn(Optional.of(employee()));
+        when(leaveHistoryClient.getLeavesForEmployee(req.employeeId())).thenReturn(List.of());
+        when(leaveHistoryClient.searchOverlappingApproved(any(), any(), any())).thenReturn(List.of());
+        stubChunks(List.of(chunk("policy", "p.pdf")));
+        stubLlm(new LlmEvaluation(Outcome.APPROVE, 0.8, List.of("r")));
+
+        service.evaluate(req);
+
+        ArgumentCaptor<String> capture = ArgumentCaptor.forClass(String.class);
+        verify(requestSpec).user(capture.capture());
+        assertThat(capture.getValue()).contains("FLAGS: (none)");
     }
 
     @Test
